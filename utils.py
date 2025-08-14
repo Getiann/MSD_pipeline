@@ -1,5 +1,7 @@
 import torch
 from Bio.PDB import PDBParser
+from Bio.PDB import is_aa
+from Bio.SeqUtils import seq1
 
 def softmax_cross_entropy(logits, labels):
     loss = -1 * torch.sum(
@@ -62,13 +64,49 @@ def distogram_loss(
 
     return mean
 
+def distogram_prob_loss(
+    logits,
+    pseudo_beta,
+    pseudo_beta_mask,
+    min_bin=2.3125,
+    max_bin=21.6875,
+    no_bins=64,
+    eps=1e-6,
+    **kwargs,
+):
+    if not isinstance(logits, torch.Tensor):
+        logits = torch.tensor(logits, dtype=torch.float32)
+    if not isinstance(pseudo_beta, torch.Tensor):
+        pseudo_beta = torch.tensor(pseudo_beta, dtype=torch.float32)
+    if not isinstance(pseudo_beta_mask, torch.Tensor):
+        pseudo_beta_mask = torch.tensor(pseudo_beta_mask, dtype=torch.float32)
 
-def pdb_to_tensor(pdb_file):
+    boundaries = torch.linspace(
+        min_bin,
+        max_bin,
+        no_bins - 1,
+        # device=logits.device,
+    )
+    boundaries = boundaries ** 2
+
+    dists = torch.sum(
+        (pseudo_beta[..., None, :] - pseudo_beta[..., None, :, :]) ** 2,
+        dim=-1,
+        keepdims=True,
+    )
+    true_bins = torch.sum(dists > boundaries, dim=-1)
+    true_bins = true_bins.unsqueeze(2) # L,L,1
+    select_prob = logits.gather(2, true_bins) # L,L,1
+    select_prob = select_prob.squeeze(2)
+
+    return select_prob.mean()
+
+def pdb_to_tensor(pdb_file, include_hetero=True):
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure('structure', pdb_file)
 
     coords = []
-
+    res_id = []
     for model in structure:
         for chain in model:
             for residue in chain:
@@ -81,18 +119,35 @@ def pdb_to_tensor(pdb_file):
 
                     if atom_name in residue:
                         atom = residue[atom_name]
+                        # if atom.get_altloc() in ("A", " "):
+
+                        res_id.append(residue.id[1])
                         coords.append(atom.coord)
                     else:
                         continue
-                else:
+                elif residue.id[0] == "H" and include_hetero:
                     for atom in residue:
                         if atom.element != "H":
                             coords.append(atom.coord)
 
     coords_tensor = torch.tensor(coords, dtype=torch.float32)
-    return coords_tensor
+    return coords_tensor,res_id
 
-def af3_json(pdb_sequence=None, chain_id=[], name=None, seed=None, single=True, ligandccd=None, ligand_id=None, modify=None):
+def extract_sequences(pdb_file):
+    parser = PDBParser()
+    structure = parser.get_structure("PDB", pdb_file)
+
+    sequences = {}
+    for model in structure:
+        for chain in model:
+            residues = [res for res in chain if res.id[0] == ' ']
+            sequence = "".join([seq1(res.resname) for res in residues])
+            sequences[chain.id] = sequence
+    return sequences
+
+def af3_json(pdb_sequence=None, chain_id=[], version=1,
+             name=None, seed=None, single=True, ligandccd=None, ligand_id=None, modify=None,
+             userCCD_path=None, bonds=[]):
     '''
     This script only protein & ligand, and no gly and modify.
     seed is a list
@@ -105,12 +160,12 @@ def af3_json(pdb_sequence=None, chain_id=[], name=None, seed=None, single=True, 
     '''
     af3_dic = {}
     af3_dic['dialect'] = "alphafold3"
-    af3_dic["version"] = 1
+    af3_dic["version"] = version
     af3_dic['name'] = name
     af3_dic['sequences'] = []
     af3_dic['modelSeeds'] = list(seed)
-    af3_dic["bondedAtomPairs"] = None #[[["A",143,"NZ"],["B",1,"C15"]]]
-    af3_dic["userCCD"]= None
+    af3_dic["bondedAtomPairs"] = bonds #[[["A",143,"NZ"],["B",1,"C15"]]]
+    af3_dic["userCCDPath"]= userCCD_path
 
     chains = str(pdb_sequence).split(',')
     for _, i in enumerate(chain_id):
