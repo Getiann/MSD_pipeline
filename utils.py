@@ -2,6 +2,9 @@ import torch
 from Bio.PDB import PDBParser
 from Bio.PDB import is_aa
 from Bio.SeqUtils import seq1
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 def softmax_cross_entropy(logits, labels):
     loss = -1 * torch.sum(
@@ -138,7 +141,7 @@ def pdb_to_tensor(pdb_file, include_hetero=True):
                             coords.append(atom.coord)
 
     coords_tensor = torch.tensor(coords, dtype=torch.float32)
-    return coords_tensor,res_id
+    return coords_tensor
 
 def extract_sequences(pdb_file):
     parser = PDBParser()
@@ -194,3 +197,73 @@ def af3_json(pdb_sequence=None, chain_id=[], version=1,
         af3_dic['sequences'].append({"ligand":ligand})
 
     return af3_dic
+
+
+
+def mean_max_prob(arr: np.ndarray) -> float:
+
+    if arr.ndim != 3 or arr.shape[0] != arr.shape[1] :
+        raise ValueError("输入必须是 (L, L, C) 维度的 numpy array")
+
+    max_probs = arr.max(axis=-1)   # 在最后一维取最大值 => (L, L)
+    mean_value = max_probs.mean()  # 对整个 (L, L) 求平均
+
+    return mean_value
+
+def plot_contact_3d(P, name: str,pseudo_beta=None ,out_dir: str = "./"):
+    """
+    P: (L, L, 64) contact map
+    index_map: (L, L, 1) 指定每个位置取哪一维,如果没有指定，则每个维度取最大概率
+    """
+    L = P.shape[0]
+    assert P.shape[-1] == 64, "最后一维必须是64"
+    min_bin=2.3125
+    max_bin=21.6875
+    no_bins=64
+
+    bin_centers = torch.linspace(
+    min_bin,
+    max_bin,
+    no_bins - 1,)
+    bin_centers = torch.tensor(bin_centers, dtype=torch.float32)
+    if pseudo_beta is not None:
+        if not isinstance(pseudo_beta, torch.Tensor):
+            pseudo_beta = torch.tensor(pseudo_beta, dtype=torch.float32)
+        dists = torch.sum(
+            (pseudo_beta[..., None, :] - pseudo_beta[..., None, :, :]),
+            dim=-1,
+            keepdims=True,
+        )
+        index_map = torch.sum(dists > bin_centers, dim=-1)
+        print(index_map)
+        index_map = index_map.unsqueeze(2)
+    else:
+        index_map = np.argmax(P, axis=-1)[..., None] # 取最大概率对应的索引
+
+
+    Z = np.zeros((L, L))
+    C = np.zeros((L, L))
+    bin_centers = np.append(bin_centers, bin_centers[-1] + (bin_centers[-1] - bin_centers[-2]))
+    for i in range(L):
+        for j in range(L):
+            bin_idx = int(index_map[i, j, 0])
+            Z[i, j] = bin_centers[bin_idx]  # 高度 = bin 中心距离
+            C[i, j] = P[i, j, bin_idx]      # 颜色 = 对应概率值
+
+
+    X, Y = np.meshgrid(np.arange(L), np.arange(L), indexing='ij')
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+    surf = ax.plot_surface(X, Y, Z, facecolors=plt.cm.viridis(C),
+                        rstride=1, cstride=1, linewidth=0, antialiased=False)
+
+    mappable = plt.cm.ScalarMappable(cmap='viridis')
+    mappable.set_array(C)
+    fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=5, label='Probability')
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Distance")
+    ax.set_title(f"{name} (Height = Distance, Color = Probability)")
+    out_file = f"{out_dir}/{name}_contactmap.png"
+    plt.savefig(out_file, bbox_inches='tight')
+    plt.close(fig)
