@@ -15,7 +15,7 @@ def softmax_cross_entropy(logits, labels):
 
 def cross_entropy(logits, labels):
     loss = -1 * torch.sum(
-        labels * logits,
+        labels * torch.log(logits),
         dim=-1,
     )
     return loss
